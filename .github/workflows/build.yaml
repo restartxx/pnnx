@@ -1,0 +1,284 @@
+name: release-aarch64-linux
+
+on:
+  push:
+    tags:
+      - '*'
+
+env:
+  LIBTORCH_VERSION: 2.8.0
+  TORCHVISION_VERSION: 0.23.0
+  PROTOBUF_VERSION: 21.12
+  ONNXRUNTIME_VERSION: 1.22.1
+  CACHE_DATE: 20250818
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    permissions:
+      contents: none
+    runs-on: ubuntu-latest
+    outputs:
+      VERSION: ${{ steps.get_version.outputs.VERSION }}
+    steps:
+    - name: get-version
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_OUTPUT
+
+  aarch64-deps:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 1800
+    steps:
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.11'
+    - name: pnnx-patches
+      uses: actions/checkout@v5
+      with:
+        path: pnnx-patches
+        
+    - name: cache-libtorch
+      id: cache-libtorch
+      uses: actions/cache@v4.2.4
+      with:
+        path: "/tmp/libtorch"
+        key: libtorch-${{ env.LIBTORCH_VERSION }}-linux-aarch64-static-${{ env.CACHE_DATE }}
+    - name: cache-torchvision
+      id: cache-torchvision
+      uses: actions/cache@v4.2.4
+      with:
+        path: "/tmp/torchvision"
+        key: torchvision-${{ env.TORCHVISION_VERSION }}-linux-aarch64-static-${{ env.CACHE_DATE }}
+    - name: cache-onnxruntime
+      id: cache-onnxruntime
+      uses: actions/cache@v4.2.4
+      with:
+        path: "/tmp/onnxruntime"
+        key: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-linux-aarch64-static-${{ env.CACHE_DATE }}
+
+    - name: build-libtorch-static
+      if: steps.cache-libtorch.outputs.cache-hit != 'true'
+      uses: pypa/cibuildwheel@v3.1.3
+      env:
+        CIBW_ARCHS_LINUX: "aarch64"
+        CIBW_BUILD: 'cp310-manylinux_aarch64'
+        CIBW_BUILD_VERBOSITY: 1
+        CIBW_REPAIR_WHEEL_COMMAND: ""
+        CIBW_BEFORE_ALL: |
+          yum install wget zip -y &&
+          wget -q https://github.com/pytorch/pytorch/releases/download/v${{ env.LIBTORCH_VERSION }}/pytorch-v${{ env.LIBTORCH_VERSION }}.tar.gz &&
+          tar -xf pytorch-v${{ env.LIBTORCH_VERSION }}.tar.gz &&
+          cd pytorch-v${{ env.LIBTORCH_VERSION }} &&
+          pip install -r requirements.txt &&
+          patch -p1 -i /project/pnnx-patches/pytorch-v${{ env.LIBTORCH_VERSION }}-fix-mobile-build.patch &&
+          patch -p1 -i /project/pnnx-patches/pytorch-v${{ env.LIBTORCH_VERSION }}-no-link-system-lib.patch &&
+          patch -p1 -i /project/pnnx-patches/pytorch-v${{ env.LIBTORCH_VERSION }}-set-python-executable.patch &&
+          patch -p1 -i /project/pnnx-patches/pytorch-v${{ env.LIBTORCH_VERSION }}-no-arm64-sleef.patch &&
+          patch -p1 -i /project/pnnx-patches/pytorch-v${{ env.LIBTORCH_VERSION }}-no-arm64-sve.patch &&
+          patch -p1 -i /project/pnnx-patches/pytorch-v${{ env.LIBTORCH_VERSION }}-fix-arm-gcc14-build.patch &&
+          mkdir -p build && cd build &&
+          cmake -DCMAKE_INSTALL_PREFIX="/host/tmp/libtorch" \
+                -DCMAKE_BUILD_TYPE=MinSizeRel \
+                -DBUILD_SHARED_LIBS=OFF \
+                -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+                -DBUILD_CUSTOM_PROTOBUF=OFF \
+                -DBUILD_LITE_INTERPRETER=OFF \
+                -DBUILD_PYTHON=OFF \
+                -DINTERN_BUILD_MOBILE=ON \
+                -DINTERN_DISABLE_AUTOGRAD=ON \
+                -DINTERN_DISABLE_ONNX=ON \
+                -DUSE_CUDA=OFF \
+                -DUSE_DISTRIBUTED=OFF \
+                -DUSE_ITT=OFF \
+                -DUSE_KINETO=OFF \
+                -DUSE_LITE_INTERPRETER_PROFILER=OFF \
+                -DUSE_MKLDNN=OFF \
+                -DUSE_MPS=OFF \
+                -DUSE_NUMPY=OFF \
+                -DUSE_OPENMP=OFF \
+                -DUSE_SOURCE_DEBUG_ON_MOBILE=OFF \
+                -DUSE_XNNPACK=OFF \
+                .. &&
+          cmake --build . -j $(nproc) &&
+          cmake --build . --target install/strip
+      with:
+        package-dir: pnnx-patches
+        output-dir: wheelhouse1
+
+    - name: build-torchvision-static
+      if: steps.cache-torchvision.outputs.cache-hit != 'true'
+      uses: pypa/cibuildwheel@v3.1.3
+      env:
+        CIBW_ARCHS_LINUX: "aarch64"
+        CIBW_BUILD: 'cp310-manylinux_aarch64'
+        CIBW_BUILD_VERBOSITY: 1
+        CIBW_REPAIR_WHEEL_COMMAND: ""
+        CIBW_BEFORE_ALL: |
+          yum install wget zip -y &&
+          wget -q https://github.com/pytorch/vision/archive/refs/tags/v${{ env.TORCHVISION_VERSION }}.zip -O vision-${{ env.TORCHVISION_VERSION }}.zip &&
+          unzip -q vision-${{ env.TORCHVISION_VERSION }}.zip &&
+          cd vision-${{ env.TORCHVISION_VERSION }} &&
+          patch -p1 -i /project/pnnx-patches/vision-${{ env.TORCHVISION_VERSION }}-ops-only.patch &&
+          patch -p1 -i /project/pnnx-patches/vision-${{ env.TORCHVISION_VERSION }}-no-cuda-version.patch &&
+          mkdir -p build && cd build &&
+          cmake -DCMAKE_INSTALL_PREFIX="/host/tmp/torchvision" \
+                -DTorch_DIR="/host/tmp/libtorch/share/cmake/Torch" \
+                -DCMAKE_BUILD_TYPE=MinSizeRel \
+                -DBUILD_SHARED_LIBS=OFF \
+                -DWITH_PNG=OFF \
+                -DWITH_JPEG=OFF \
+                .. &&
+          cmake --build . -j $(nproc) &&
+          cmake --build . --target install/strip
+      with:
+        package-dir: pnnx-patches
+        output-dir: wheelhouse2
+
+    - name: build-onnxruntime-static
+      if: steps.cache-onnxruntime.outputs.cache-hit != 'true'
+      uses: pypa/cibuildwheel@v3.1.3
+      env:
+        CIBW_ARCHS_LINUX: "aarch64"
+        CIBW_BUILD: 'cp310-manylinux_aarch64'
+        CIBW_BUILD_VERBOSITY: 1
+        CIBW_REPAIR_WHEEL_COMMAND: ""
+        CIBW_BEFORE_ALL: |
+          yum install wget zip -y &&
+          wget -q https://github.com/protocolbuffers/protobuf/archive/v${{ env.PROTOBUF_VERSION }}.zip -O protobuf-${{ env.PROTOBUF_VERSION }}.zip &&
+          unzip -q protobuf-${{ env.PROTOBUF_VERSION }}.zip &&
+          cd protobuf-${{ env.PROTOBUF_VERSION }} &&
+          mkdir -p build2 && cd build2 &&
+          cmake -DCMAKE_INSTALL_PREFIX="/host/tmp/onnxruntime" \
+                -Dprotobuf_BUILD_TESTS=OFF \
+                -DCMAKE_BUILD_TYPE=MinSizeRel \
+                -DBUILD_SHARED_LIBS=OFF \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+                .. &&
+          cmake --build . -j $(nproc) &&
+          cmake --build . --target install/strip &&
+          cd ../../ &&
+          wget -q https://github.com/microsoft/onnxruntime/archive/v${{ env.ONNXRUNTIME_VERSION }}.zip -O onnxruntime-${{ env.ONNXRUNTIME_VERSION }}.zip &&
+          unzip -q onnxruntime-${{ env.ONNXRUNTIME_VERSION }}.zip &&
+          cd onnxruntime-${{ env.ONNXRUNTIME_VERSION }} &&
+          patch -p1 -i /project/pnnx-patches/onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-less-mlas-features.patch &&
+          patch -p1 -i /project/pnnx-patches/onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-monolithic-static-library.patch &&
+          patch -p1 -i /project/pnnx-patches/onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-use-clog.patch &&
+          mkdir -p build2 && cd build2 &&
+          cmake -DCMAKE_INSTALL_PREFIX="/host/tmp/onnxruntime" \
+                -DCMAKE_BUILD_TYPE=MinSizeRel \
+                -Donnxruntime_USE_FULL_PROTOBUF=ON \
+                -Donnxruntime_BUILD_SHARED_LIB=OFF \
+                -Donnxruntime_BUILD_UNIT_TESTS=OFF \
+                -Donnxruntime_ENABLE_CPUINFO=OFF \
+                -Donnxruntime_DISABLE_CONTRIB_OPS=ON \
+                -Donnxruntime_DISABLE_ML_OPS=ON \
+                -Donnxruntime_DISABLE_SPARSE_TENSORS=ON \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+                ../cmake &&
+          cmake --build . -j $(nproc) &&
+          cmake --build . --target install/strip
+      with:
+        package-dir: pnnx-patches
+        output-dir: wheelhouse3
+
+  build-pnnx-static:
+    needs: [setup, aarch64-deps]
+    runs-on: ubuntu-24.04-arm
+    env:
+      PACKAGENAME: pnnx-${{ needs.setup.outputs.VERSION }}-linux-aarch64-static
+    steps:
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.11'
+    - name: pnnx-patches
+      uses: actions/checkout@v5
+      with:
+        path: pnnx-patches
+        
+    - name: cache-libtorch
+      id: cache-libtorch
+      uses: actions/cache@v4.2.4
+      with:
+        path: "/tmp/libtorch"
+        key: libtorch-${{ env.LIBTORCH_VERSION }}-linux-aarch64-static-${{ env.CACHE_DATE }}
+    - name: cache-torchvision
+      id: cache-torchvision
+      uses: actions/cache@v4.2.4
+      with:
+        path: "/tmp/torchvision"
+        key: torchvision-${{ env.TORCHVISION_VERSION }}-linux-aarch64-static-${{ env.CACHE_DATE }}
+    - name: cache-onnxruntime
+      id: cache-onnxruntime
+      uses: actions/cache@v4.2.4
+      with:
+        path: "/tmp/onnxruntime"
+        key: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-linux-aarch64-static-${{ env.CACHE_DATE }}
+        
+    - name: checkout-ncnn
+      uses: actions/checkout@v5
+      with:
+        repository: Tencent/ncnn
+        path: ncnn
+
+    - name: build-pnnx-static-binary
+      uses: pypa/cibuildwheel@v3.1.3
+      env:
+        CIBW_ARCHS_LINUX: "aarch64"
+        CIBW_BUILD: 'cp310-manylinux_aarch64'
+        CIBW_BUILD_VERBOSITY: 1
+        CIBW_REPAIR_WHEEL_COMMAND: ""
+        CIBW_BEFORE_ALL: |
+          yum install wget zip -y &&
+          cd /project/ncnn/tools/pnnx/ &&
+          mkdir build && cd build &&
+          cmake -DCMAKE_INSTALL_PREFIX=/host/tmp/install \
+                -DCMAKE_BUILD_TYPE=MinSizeRel \
+                -DBUILD_SHARED_LIBS=OFF \
+                -DTorch_INSTALL_DIR="/host/tmp/libtorch" \
+                -DTorchVision_INSTALL_DIR="/host/tmp/torchvision" \
+                -Donnxruntime_INSTALL_DIR="/host/tmp/onnxruntime" \
+                -DProtobuf_INCLUDE_DIR="/host/tmp/onnxruntime/include" \
+                -DProtobuf_LIBRARIES="/host/tmp/onnxruntime/lib64/libprotobuf.a" \
+                -DProtobuf_PROTOC_EXECUTABLE="/host/tmp/onnxruntime/bin/protoc" \
+                .. &&
+          cmake --build . -j $(nproc) &&
+          cmake --build . --target install/strip
+      with:
+        package-dir: pnnx-patches
+        output-dir: wheelhouse
+
+    - name: package-static-binary
+      run: |
+        mkdir ${{ env.PACKAGENAME }}
+        cp pnnx-patches/README.md ${{ env.PACKAGENAME }}
+        cp /tmp/install/bin/pnnx ${{ env.PACKAGENAME }}
+        chmod +x ${{ env.PACKAGENAME }}/pnnx
+        zip -9 -r ${{ env.PACKAGENAME }}.zip ${{ env.PACKAGENAME }}
+        
+    - name: upload-artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.PACKAGENAME }}
+        path: ${{ env.PACKAGENAME }}.zip
+
+  release-aarch64:
+    permissions:
+      contents: write
+    needs: [setup, build-pnnx-static]
+    runs-on: ubuntu-latest
+    steps:
+    - name: download-static-binary
+      uses: actions/download-artifact@v5
+      with:
+        name: pnnx-${{ needs.setup.outputs.VERSION }}-linux-aarch64-static
+        path: artifacts
+        
+    - name: create-release
+      uses: softprops/action-gh-release@v2
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        tag_name: ${{ needs.setup.outputs.VERSION }}
+        name: Release ${{ needs.setup.outputs.VERSION }} - AArch64 Static Binary
+        files: artifacts/*.zip
